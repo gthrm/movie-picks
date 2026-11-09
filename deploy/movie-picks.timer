@@ -1,5 +1,5 @@
 [Unit]
-Description=movie-picks every evening at 18:00 CET
+Description=movie-picks every evening at 18:00 Europe/Belgrade
 
 [Timer]
 OnCalendar=*-*-* 18:00:00 Europe/Belgrade

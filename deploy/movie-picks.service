@@ -6,7 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=user
-Environment=HOME=/home/user
 WorkingDirectory=/home/user/movie-picks
 ExecStart=/usr/bin/python3 -I /home/user/movie-picks/app/movie_picks.py pick
-TimeoutStartSec=1800
+TimeoutStartSec=3600

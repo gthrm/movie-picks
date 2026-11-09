@@ -4,6 +4,7 @@
 
   movie_picks.py pick [--dry-run]   build today's picks and email them
   movie_picks.py serve              run the download-link web handler
+  movie_picks.py watch              replace stalled torrents (blocklist + search again)
   movie_picks.py sync               pull new Letterboxd ratings (liked = rated > 3 stars)
 """
 import csv

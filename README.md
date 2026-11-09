@@ -10,7 +10,8 @@ Runs on a Raspberry Pi next to Radarr, Prowlarr, Bazarr and qBittorrent.
 
 1. **Sync taste** — pulls your Letterboxd films (RSS + public pages, or a data
    export `.zip` dropped into `lists/`) and IMDb list CSVs into Postgres.
-   A film rated above 3 stars counts as *liked*.
+   *Liked* = a Letterboxd ♥ or a rating above 3 stars; films from IMDb lists
+   count as liked unless rated below 3.5.
 2. **Pick** (`app/selection.py`) — diversity-first selection:
    - taste is split once into distinct *facets*, stored in Postgres;
    - every evening each facet gets random anchor films, a rotating "lens"
@@ -39,22 +40,22 @@ reports/, research_notes/  research behind the selection design (RU/EN)
 
 ## Setup
 
-Requirements: Python 3 (tested on 3.14), `psycopg` (v3), PostgreSQL, Docker, qBittorrent,
+Requirements: Python 3 (tested on 3.14), `psycopg` (v3), PostgreSQL with an empty
+database for `DATABASE_URL` (tables are created on first run), Docker, qBittorrent,
 the [Claude Code](https://claude.com/claude-code) CLI logged in
 (`~/.local/bin/claude`), a Gmail app password for SMTP.
 
 ```sh
 cp .env.example .env            # fill in values
 docker network create --subnet 172.31.77.0/24 media   # if it doesn't exist
+# media dir must exist: /mnt/backup/media (edit docker-compose.yml for your path)
 docker compose up -d
 
 mkdir -p state
 # API keys from each app's Settings → General
 echo <radarr key>   > state/radarr.key
 echo <prowlarr key> > state/prowlarr.key
-python3 setup/configure_arr.py
-# id of the "1080p ≤5GB" profile created by the script
-echo <profile id>   > state/radarr_profile_id
+python3 setup/configure_arr.py   # also writes state/radarr_profile_id
 
 python3 app/movie_picks.py sync
 python3 app/movie_picks.py pick --dry-run   # writes state/last_email.html
@@ -70,7 +71,7 @@ sudo systemctl enable --now movie-picks.timer movie-picks-watch.timer movie-pick
 ```
 
 Paths in the units assume the repo lives at `/home/user/movie-picks` and runs as
-`user` — adjust to your setup.
+`user`; the Claude CLI is looked up at `~/.local/bin/claude` of that user — adjust to your setup.
 
 ## Commands
 

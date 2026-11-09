@@ -1,6 +1,7 @@
 [Unit]
 Description=movie-picks download-link handler
 After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 User=user

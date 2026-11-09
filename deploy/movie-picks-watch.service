@@ -1,6 +1,7 @@
 [Unit]
 Description=movie-picks stalled-download watcher
 After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
