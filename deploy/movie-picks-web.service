@@ -1,0 +1,13 @@
+[Unit]
+Description=movie-picks download-link handler
+After=network-online.target docker.service
+
+[Service]
+User=user
+WorkingDirectory=/home/user/movie-picks
+ExecStart=/usr/bin/python3 -I /home/user/movie-picks/app/movie_picks.py serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

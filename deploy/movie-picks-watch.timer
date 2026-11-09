@@ -1,0 +1,9 @@
+[Unit]
+Description=movie-picks stalled-download check every 30 min
+
+[Timer]
+OnCalendar=*:00/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
