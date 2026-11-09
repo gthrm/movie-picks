@@ -1,0 +1,40 @@
+services:
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=Europe/Belgrade]
+    volumes:
+      - ./radarr:/config
+      - type: bind
+        source: /mnt/backup/media
+        target: /media
+        bind: {create_host_path: false}
+    ports: ["127.0.0.1:7878:7878"]
+    networks:
+      media: {ipv4_address: 172.31.77.10}
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=Europe/Belgrade]
+    volumes: [./prowlarr:/config]
+    ports: ["127.0.0.1:9696:9696"]
+    networks:
+      media: {ipv4_address: 172.31.77.11}
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=Europe/Belgrade]
+    volumes:
+      - ./bazarr:/config
+      - type: bind
+        source: /mnt/backup/media
+        target: /media
+        bind: {create_host_path: false}
+    ports: ["6767:6767"]
+    networks:
+      media: {ipv4_address: 172.31.77.12}
+networks:
+  media: {external: true}

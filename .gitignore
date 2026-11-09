@@ -1,0 +1,15 @@
+# secrets & local config
+.env
+state/
+
+# personal data
+lists/
+pgdata/
+
+# *arr container configs (API keys, DBs, logs)
+radarr/
+prowlarr/
+bazarr/
+
+__pycache__/
+*.pyc
