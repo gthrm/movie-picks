@@ -81,8 +81,3 @@ Paths in the units assume the repo lives at `/home/user/movie-picks` and runs as
 | `movie_picks.py serve` | run the download-link web handler |
 | `movie_picks.py watch` | replace stalled torrents |
 | `movie_picks.py sync` | pull new Letterboxd ratings |
-
-## Not in the repo
-
-`.env`, `state/` (API keys), `lists/` (personal lists), `pgdata/`, and the
-`radarr/`, `prowlarr/`, `bazarr/` config folders are gitignored.
