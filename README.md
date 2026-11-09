@@ -22,7 +22,6 @@ Runs on a Raspberry Pi next to Radarr, Prowlarr, Bazarr and qBittorrent.
    download link (HMAC, expiring).
 4. **Download page** (`serve`) — the link opens a small page; *Download* adds the
    film to Radarr (1080p, ≤ 5 GB) and shows search/download progress.
-   Downloading a film also marks it as liked — the strongest taste signal.
 5. **Watcher** (`watch`) — every 30 min checks the queue; a torrent with < 2 %
    progress in 2 hours is blocklisted and Radarr searches for another release.
 

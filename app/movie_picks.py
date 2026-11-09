@@ -92,21 +92,6 @@ def event(tmdb, kind, **detail):
         log("event log failed:", e)
 
 
-def add_liked(m):
-    """Film the user chose to download -> their list, liked, strongest taste signal."""
-    try:
-        with db() as c:
-            c.execute(
-                "insert into films(key, name, year, imdb, tmdb, liked, original, source) "
-                "values (%s,%s,%s,%s,%s,true,%s,'download') "
-                "on conflict (key) do update set liked=true, source='download', tmdb=excluded.tmdb, "
-                "imdb=coalesce(excluded.imdb, films.imdb), updated_at=now()",
-                (fkey(m["title"], m.get("year")), m["title"], m.get("year"), m.get("imdbId") or None,
-                 m["tmdbId"], m.get("originalTitle")))
-    except Exception as e:  # noqa: BLE001
-        log("add_liked failed:", e)
-
-
 def log(*a):
     print(dt.datetime.now().strftime("%H:%M:%S"), *a, flush=True)
 
