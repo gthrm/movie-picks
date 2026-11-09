@@ -1,0 +1,10 @@
+[Unit]
+Description=movie-picks stalled-download watcher
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/home/user/movie-picks
+ExecStart=/usr/bin/python3 -I /home/user/movie-picks/app/movie_picks.py watch

@@ -1,0 +1,9 @@
+[Unit]
+Description=movie-picks every evening at 18:00 Europe/Berlin
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target
