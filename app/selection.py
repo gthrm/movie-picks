@@ -9,6 +9,7 @@
 import datetime as dt
 import json
 import random
+import re
 import urllib.request
 
 import movie_picks as mp
@@ -55,7 +56,14 @@ def canon_set():
     return tmdb
 
 
+def facet_key(item):
+    """'Title (Year)' as written in a facet -> films-dict key."""
+    m = re.match(r"^(.*) \((\d{4})\)$", item.strip())
+    return mp.fkey(m.group(1), int(m.group(2))) if m else mp.fkey(item, None)
+
+
 def get_facets(films, n):
+    """Facets are built from LIKED films only; rebuilt when 10+ new liked films arrived."""
     with mp.db() as c:
         ensure_tables(c)
         row = c.execute("select films_count from facets order by created_at desc limit 1").fetchone()
@@ -80,20 +88,25 @@ Respond with ONLY JSON: [{{"facet": "name", "films": ["Title (Year)", ...]}}, ..
     return [{"name": f["facet"], "films": f["films"]} for f in facets]
 
 
-def ask(facets, films, exclude, rng, per_facet=6):
+def ask(facets, liked, exclude, rng, per_facet=6):
+    """liked: films-dict of liked films only. Anchors come only from liked films; liked films that
+    arrived after the facets were built (new Letterboxd ratings > 3) go in as the strongest signal."""
     lenses = rng.sample(LENSES, k=min(len(LENSES), len(facets)))
+    in_facets = set()
     blocks = []
     for f, lens in zip(facets, lenses):
-        anchors = rng.sample(f["films"], k=min(len(f["films"]), rng.randint(4, 6)))
+        pool = [x for x in f["films"] if facet_key(x) in liked]
+        in_facets |= {facet_key(x) for x in f["films"]}
+        anchors = rng.sample(pool, k=min(len(pool), rng.randint(4, 6)))
         f["lens"] = lens
         blocks.append(f'- Facet "{f["name"]}". Anchors: {"; ".join(anchors)}. Tonight\'s lens: {lens}.')
-    picked = [f"{x['name']} ({x.get('year')})" for x in films.values() if x.get("source") == "download"]
+    picked = [f"{x['name']} ({x.get('year') or '?'})" for k, x in liked.items() if k not in in_facets]
     rng.shuffle(blocks)
     prompt = f"""Recommend films for one person, facet by facet. For each facet, the anchors are films from their
 list; the lens is a HARD constraint for that facet tonight.
 {chr(10).join(blocks)}
 
-{('Films they recently CHOSE to watch (strongest taste signal): ' + '; '.join(picked)) if picked else ''}
+{('Films they recently rated highly (strongest taste signal, use them as extra anchors): ' + '; '.join(picked)) if picked else ''}
 
 Do NOT suggest any film from their list or anything already suggested before:
 {'; '.join(exclude)}
@@ -125,8 +138,9 @@ def choose(films, history):
     exclude = [f"{h['title']} ({h['year']})" for h in history]
 
     # short DB connections only: never hold one open during the long Claude call (Neon compute)
-    facets = get_facets(films, n)
-    answer = ask(facets, films, exclude, rng)
+    liked = {k: f for k, f in films.items() if f.get("liked")}
+    facets = get_facets(liked, n)
+    answer = ask(facets, liked, exclude, rng)
     lens_of = {f["name"]: f.get("lens", "") for f in facets}
     picks, logrows = [], []
 
