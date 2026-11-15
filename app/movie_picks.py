@@ -272,10 +272,19 @@ def run_claude(prompt, system=None):
          "--model", CFG["CLAUDE_MODEL"], "--tools", "", "--strict-mcp-config", "--no-session-persistence",
          *(["--append-system-prompt", system] if system else [])],
         capture_output=True, text=True, timeout=1200, env=env, cwd=STATE)
-    if out.returncode != 0:
+    try:
+        meta = json.loads(out.stdout)
+    except ValueError:
+        meta = {}
+    if meta.get("api_error_status") == 429 or (meta.get("is_error") and "limit" in str(meta.get("result", "")).lower()):
+        raise ClaudeLimit(meta.get("result", "usage limit"))
+    if out.returncode != 0 or meta.get("is_error") or "result" not in meta:
         raise RuntimeError(f"claude failed: {out.stderr[-2000:]} {out.stdout[-2000:]}")
-    text = json.loads(out.stdout)["result"]
-    return json.loads(re.search(r"\[.*\]", text, re.S).group(0))
+    return json.loads(re.search(r"\[.*\]", meta["result"], re.S).group(0))
+
+
+class ClaudeLimit(RuntimeError):
+    """Subscription usage limit hit; worth retrying later."""
 
 
 def ask_claude(films, exclude, n):
@@ -494,6 +503,17 @@ def send_email(subject, html_body, text_body):
     log("email sent to", rcpts)
 
 
+def cmd_pick_with_retry(dry_run=False, tries=17, wait_min=30):
+    for i in range(tries):
+        try:
+            return cmd_pick(dry_run)
+        except Exception as e:  # selection.py imports this module separately -> match by class name
+            if type(e).__name__ != "ClaudeLimit" or i == tries - 1:
+                raise
+            log(f"Claude usage limit ({e}); retrying in {wait_min} min ({i + 1}/{tries - 1})")
+            time.sleep(wait_min * 60)
+
+
 def cmd_pick(dry_run=False):
     history = load_history()
     films = load_films()
@@ -639,17 +659,19 @@ STALL_MIN_PROGRESS = 0.02   # less than 2% of the file in STALL_HOURS -> stalled
 
 def cmd_watch():
     """Replace stalled torrents: blocklist the release and let Radarr grab another one."""
+    queue = radarr("GET", "/queue?pageSize=100&includeMovie=true").get("records", [])
+    if not queue:
+        return  # nothing downloading: don't wake the database at all
     with db() as c:
         c.execute("""create table if not exists dl_progress (
             download_id text primary key, tmdb int, title text, size bigint,
             checkpoint_at timestamptz not null, checkpoint_left bigint not null)""")
-        queue = radarr("GET", "/queue?pageSize=100&includeMovie=true").get("records", [])
-        live = set()
+        live = {r.get("downloadId") for r in queue if r.get("downloadId")}
+        c.execute("delete from dl_progress where not (download_id = any(%s))", (list(live),))
         for r in queue:
             did, size, left = r.get("downloadId"), r.get("size") or 0, r.get("sizeleft") or 0
             if not did or not size:
                 continue
-            live.add(did)
             row = c.execute("select checkpoint_at, checkpoint_left from dl_progress where download_id=%s", (did,)).fetchone()
             if not row:
                 c.execute("insert into dl_progress values (%s,%s,%s,%s,now(),%s)",
@@ -666,10 +688,6 @@ def cmd_watch():
             radarr("DELETE", f"/queue/{r['id']}?removeFromClient=true&blocklist=true&skipRedownload=false")
             event(r["movie"]["tmdbId"], "stalled", release=r.get("title"), hours=round(hours, 1))
             c.execute("delete from dl_progress where download_id=%s", (did,))
-        if live:
-            c.execute("delete from dl_progress where not (download_id = any(%s))", (list(live),))
-        else:
-            c.execute("delete from dl_progress")
 
 
 def recent_stall(tmdb):
@@ -696,6 +714,6 @@ if __name__ == "__main__":
         f = load_films()
         log(f"letterboxd sync: {len(f)} films, liked {sum(1 for x in f.values() if x.get('liked'))}")
     elif len(sys.argv) > 1 and sys.argv[1] == "pick":
-        cmd_pick(dry_run="--dry-run" in sys.argv)
+        cmd_pick_with_retry(dry_run="--dry-run" in sys.argv)
     else:
         print(__doc__)

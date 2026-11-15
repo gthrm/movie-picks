@@ -60,12 +60,14 @@ def canon_set():
     return titles, tmdb, names
 
 
-def get_facets(c, films, n):
-    row = c.execute("select films_count from facets order by created_at desc limit 1").fetchone()
-    if row and len(films) - row[0] < 10:
-        latest = c.execute("select max(created_at) from facets").fetchone()[0]
-        return [{"name": r[0], "films": r[1]}
-                for r in c.execute("select name, films from facets where created_at=%s", (latest,))]
+def get_facets(films, n):
+    with mp.db() as c:
+        ensure_tables(c)
+        row = c.execute("select films_count from facets order by created_at desc limit 1").fetchone()
+        if row and len(films) - row[0] < 10:
+            latest = c.execute("select max(created_at) from facets").fetchone()[0]
+            return [{"name": r[0], "films": r[1]}
+                    for r in c.execute("select name, films from facets where created_at=%s", (latest,))]
     listing = "\n".join(f"{f['name']} ({f.get('year') or '?'})" for f in films.values())
     facets = mp.run_claude(f"""Here is one person's film list:
 {listing}
@@ -75,9 +77,10 @@ Split ALL of these films into exactly {n} taste facets that are as different fro
 At most 2 facets may be mostly pre-1980 cinema. Facet names: 2-4 words, concrete.
 Respond with ONLY JSON: [{{"facet": "name", "films": ["Title (Year)", ...]}}, ...]""")
     now = dt.datetime.now(dt.timezone.utc)
-    for f in facets:
-        c.execute("insert into facets(name, films, films_count, created_at) values (%s,%s,%s,%s)",
-                  (f["facet"], f["films"], len(films), now))
+    with mp.db() as c:
+        for f in facets:
+            c.execute("insert into facets(name, films, films_count, created_at) values (%s,%s,%s,%s)",
+                      (f["facet"], f["films"], len(films), now))
     mp.log(f"facets regenerated: {[f['facet'] for f in facets]}")
     return [{"name": f["facet"], "films": f["films"]} for f in facets]
 
@@ -126,95 +129,97 @@ def choose(films, history):
     canon_keys, canon_tmdb, canon_names = canon_set()
     exclude = [f"{h['title']} ({h['year']})" for h in history]
 
-    with mp.db() as c:
-        ensure_tables(c)
-        facets = get_facets(c, films, n)
-        answer = ask(facets, films, exclude, canon_names, rng)
-        lens_of = {f["name"]: f.get("lens", "") for f in facets}
-        picks, logrows = [], []
+    # short DB connections only: never hold one open during the long Claude call (Neon compute)
+    facets = get_facets(films, n)
+    answer = ask(facets, films, exclude, canon_names, rng)
+    lens_of = {f["name"]: f.get("lens", "") for f in facets}
+    picks, logrows = [], []
 
-        def votes(m):
-            return ((m.get("ratings") or {}).get("imdb") or {}).get("votes") or 0
+    def votes(m):
+        return ((m.get("ratings") or {}).get("imdb") or {}).get("votes") or 0
 
-        def resolve(cand):
-            k1 = mp.fkey(cand.get("title", ""), cand.get("year"))
-            k2 = mp.fkey(cand.get("original_title", ""), cand.get("year"))
-            if k1 in watched_keys or k2 in watched_keys:
-                return None, "seen"
-            if k1 in canon_keys or k2 in canon_keys:
-                return None, "canon-list"
-            try:
-                m = mp.lookup_title(cand["title"], cand.get("year")) or (
-                    cand.get("original_title") and mp.lookup_title(cand["original_title"], cand.get("year")))
-            except Exception as e:  # noqa: BLE001
-                return None, f"lookup error {e}"
-            if not m:
-                return None, "not found"
-            t = m["tmdbId"]
-            if m.get("imdbId") in watched_imdb or t in watched_tmdb or mp.fkey(m["title"], m["year"]) in watched_keys:
-                return None, "seen"
-            if t in sent_tmdb:
-                return None, "already sent"
-            if t in in_radarr:
-                return None, "in radarr"
-            if t in canon_tmdb:
-                return None, "imdb top250"
-            if any(p["tmdb"] == t for p in picks):
-                return None, "duplicate"
-            return m, "ok"
+    def resolve(cand):
+        k1 = mp.fkey(cand.get("title", ""), cand.get("year"))
+        k2 = mp.fkey(cand.get("original_title", ""), cand.get("year"))
+        if k1 in watched_keys or k2 in watched_keys:
+            return None, "seen"
+        if k1 in canon_keys or k2 in canon_keys:
+            return None, "canon-list"
+        try:
+            m = mp.lookup_title(cand["title"], cand.get("year")) or (
+                cand.get("original_title") and mp.lookup_title(cand["original_title"], cand.get("year")))
+        except Exception as e:  # noqa: BLE001
+            return None, f"lookup error {e}"
+        if not m:
+            return None, "not found"
+        t = m["tmdbId"]
+        if m.get("imdbId") in watched_imdb or t in watched_tmdb or mp.fkey(m["title"], m["year"]) in watched_keys:
+            return None, "seen"
+        if t in sent_tmdb:
+            return None, "already sent"
+        if t in in_radarr:
+            return None, "in radarr"
+        if t in canon_tmdb:
+            return None, "imdb top250"
+        if any(p["tmdb"] == t for p in picks):
+            return None, "duplicate"
+        return m, "ok"
 
-        def fits(m, cand):
-            dec = (m.get("year") or 0) // 10
-            g = (m.get("genres") or ["?"])[0]
-            d = mp.norm(cand.get("director", ""))
-            country = mp.norm(cand.get("country", ""))
-            v = votes(m)
-            return (sum(p["year"] // 10 == dec for p in picks) < 3
-                    and sum((p["genres"] or ["?"])[0] == g for p in picks) < 3
-                    and sum(mp.norm(p.get("country", "")) == country for p in picks) < 3
-                    and not (d and any(mp.norm(p["director"]) == d for p in picks))
-                    and not (v > CANON_VOTES and sum(p["votes"] > CANON_VOTES for p in picks) >= MAX_CANON))
+    def fits(m, cand):
+        dec = (m.get("year") or 0) // 10
+        g = (m.get("genres") or ["?"])[0]
+        d = mp.norm(cand.get("director", ""))
+        country = mp.norm(cand.get("country", ""))
+        v = votes(m)
+        return (sum(p["year"] // 10 == dec for p in picks) < 3
+                and sum((p["genres"] or ["?"])[0] == g for p in picks) < 3
+                and sum(mp.norm(p.get("country", "")) == country for p in picks) < 3
+                and not (d and any(mp.norm(p["director"]) == d for p in picks))
+                and not (v > CANON_VOTES and sum(p["votes"] > CANON_VOTES for p in picks) >= MAX_CANON))
 
-        groups = [g for g in answer if g.get("candidates")]
-        rng.shuffle(groups)
-        for gi, g in enumerate(groups):
-            if len(picks) >= n:
-                break
-            cands = list(g["candidates"])
-            # sample order from the verbalized distribution
-            w = [max(float(x.get("probability") or 0.05), 0.005) for x in cands]
-            order = []
-            while cands:
-                i = rng.choices(range(len(cands)), weights=w)[0]
-                order.append(cands.pop(i)); w.pop(i)
-            resolved = []
-            for cand in order:
-                m, why = resolve(cand)
-                logrows.append([today, g.get("facet"), lens_of.get(g.get("facet"), ""), cand.get("title"),
-                                cand.get("year"), m and m["tmdbId"], m and votes(m), cand.get("probability"), False, why])
-                if m:
-                    resolved.append((m, cand, len(logrows) - 1))
-            deep_have = sum(p["votes"] < DEEP_VOTES for p in picks)
-            facets_left = len(groups) - gi
-            if deep_have < MIN_DEEP and facets_left <= MIN_DEEP - deep_have:
-                resolved.sort(key=lambda r: votes(r[0]) >= DEEP_VOTES)
-            choice = next((r for r in resolved if fits(r[0], r[1])), resolved[0] if resolved else None)
-            if not choice:
-                continue
-            m, cand, li = choice
-            logrows[li][8] = True
-            picks.append({"tmdb": m["tmdbId"], "title": m["title"], "year": m["year"], "facet": g.get("facet", ""),
-                          "original_title": m.get("originalTitle") or cand.get("original_title") or m["title"],
-                          "director": cand.get("director", ""), "country": cand.get("country", ""),
-                          "why": cand.get("why", ""), "overview": m.get("overview", ""),
-                          "runtime": m.get("runtime") or 0, "genres": m.get("genres", [])[:3],
-                          "poster": mp.poster_url(m), "imdb": m.get("imdbId") or "",
-                          "trailer": m.get("youTubeTrailerId") or "", "votes": votes(m),
-                          "imdb_rating": ((m.get("ratings") or {}).get("imdb") or {}).get("value"),
-                          "language": (m.get("originalLanguage") or {}).get("name", "")})
-        with c.cursor() as cur:
+    groups = [g for g in answer if g.get("candidates")]
+    rng.shuffle(groups)
+    for gi, g in enumerate(groups):
+        if len(picks) >= n:
+            break
+        cands = list(g["candidates"])
+        # sample order from the verbalized distribution
+        w = [max(float(x.get("probability") or 0.05), 0.005) for x in cands]
+        order = []
+        while cands:
+            i = rng.choices(range(len(cands)), weights=w)[0]
+            order.append(cands.pop(i)); w.pop(i)
+        resolved = []
+        for cand in order:
+            m, why = resolve(cand)
+            logrows.append([today, g.get("facet"), lens_of.get(g.get("facet"), ""), cand.get("title"),
+                            cand.get("year"), m and m["tmdbId"], m and votes(m), cand.get("probability"), False, why])
+            if m:
+                resolved.append((m, cand, len(logrows) - 1))
+        deep_have = sum(p["votes"] < DEEP_VOTES for p in picks)
+        facets_left = len(groups) - gi
+        if deep_have < MIN_DEEP and facets_left <= MIN_DEEP - deep_have:
+            resolved.sort(key=lambda r: votes(r[0]) >= DEEP_VOTES)
+        choice = next((r for r in resolved if fits(r[0], r[1])), resolved[0] if resolved else None)
+        if not choice:
+            continue
+        m, cand, li = choice
+        logrows[li][8] = True
+        picks.append({"tmdb": m["tmdbId"], "title": m["title"], "year": m["year"], "facet": g.get("facet", ""),
+                      "original_title": m.get("originalTitle") or cand.get("original_title") or m["title"],
+                      "director": cand.get("director", ""), "country": cand.get("country", ""),
+                      "why": cand.get("why", ""), "overview": m.get("overview", ""),
+                      "runtime": m.get("runtime") or 0, "genres": m.get("genres", [])[:3],
+                      "poster": mp.poster_url(m), "imdb": m.get("imdbId") or "",
+                      "trailer": m.get("youTubeTrailerId") or "", "votes": votes(m),
+                      "imdb_rating": ((m.get("ratings") or {}).get("imdb") or {}).get("value"),
+                      "language": (m.get("originalLanguage") or {}).get("name", "")})
+    try:
+        with mp.db() as c, c.cursor() as cur:
             cur.executemany("insert into candidates(batch, facet, lens, title, year, tmdb, votes, probability, picked, reason) "
                             "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", logrows)
+    except Exception as e:  # noqa: BLE001 — logging candidates must never block the email
+        mp.log("candidates log failed:", e)
     mp.log(f"candidates: {len(logrows)}, picked: {len(picks)}, "
            f"canon: {sum(p['votes'] > CANON_VOTES for p in picks)}, deep: {sum(p['votes'] < DEEP_VOTES for p in picks)}")
     return picks
