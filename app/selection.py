@@ -1,6 +1,6 @@
 """Diversity-first selection:
 
-1. never repeat: code filters seen/sent/in-Radarr/canon; sent history + canon also go into the prompt
+1. never repeat: code filters seen/sent/in-Radarr/IMDb Top 250; sent history also goes into the prompt
 2. taste facets are generated ONCE and stored in Postgres; each evening code picks random shuffled
    anchors per facet and a rotating "lens", plus a rotating curator persona
 3. verbalized sampling: 6 tail candidates per facet with probabilities (<0.10); code samples
@@ -40,16 +40,10 @@ def ensure_tables(c):
     c.execute("""create table if not exists candidates (
         id bigserial primary key, batch date not null, facet text, lens text, title text, year int,
         tmdb int, votes int, probability real, picked boolean default false, reason text)""")
-    c.execute("""create table if not exists canon (
-        title text not null, year int not null, primary key (title, year))""")
 
 
 def canon_set():
-    """IMDb Top 250 (via Radarr's public metadata server) + the hand-picked `canon` table."""
-    with mp.db() as c:
-        ensure_tables(c)
-        rows = c.execute("select title, year from canon order by title").fetchall()
-    titles = {mp.fkey(t, y) for t, y in rows}
+    """IMDb Top 250 (via Radarr's public metadata server)."""
     tmdb = set()
     try:
         req = urllib.request.Request("https://api.radarr.video/v1/list/imdb/top250",
@@ -58,8 +52,7 @@ def canon_set():
             tmdb.add(m["TmdbId"])
     except Exception as e:  # noqa: BLE001
         mp.log("top250 fetch failed:", e)
-    names = [f"{t} ({y})" for t, y in rows]
-    return titles, tmdb, names
+    return tmdb
 
 
 def get_facets(films, n):
@@ -87,7 +80,7 @@ Respond with ONLY JSON: [{{"facet": "name", "films": ["Title (Year)", ...]}}, ..
     return [{"name": f["facet"], "films": f["films"]} for f in facets]
 
 
-def ask(facets, films, exclude, canon_names, rng, per_facet=6):
+def ask(facets, films, exclude, rng, per_facet=6):
     lenses = rng.sample(LENSES, k=min(len(LENSES), len(facets)))
     blocks = []
     for f, lens in zip(facets, lenses):
@@ -102,8 +95,8 @@ list; the lens is a HARD constraint for that facet tonight.
 
 {('Films they recently CHOSE to watch (strongest taste signal): ' + '; '.join(picked)) if picked else ''}
 
-Do NOT suggest any film from their list, anything already suggested before, or these over-recommended canon films:
-{'; '.join(exclude + canon_names)}
+Do NOT suggest any film from their list or anything already suggested before:
+{'; '.join(exclude)}
 
 For EACH facet give {per_facet} candidates sampled from the TAILS of the distribution: every candidate's
 probability (how typical a pick it would be for this facet) must be below 0.10. No famous "greatest films" canon.
@@ -128,12 +121,12 @@ def choose(films, history):
     watched_tmdb = {f.get("tmdb") for f in films.values() if f.get("tmdb")}
     sent_tmdb = {h["tmdb"] for h in history}
     in_radarr = {m["tmdbId"] for m in mp.radarr("GET", "/movie")}
-    canon_keys, canon_tmdb, canon_names = canon_set()
+    canon_tmdb = canon_set()
     exclude = [f"{h['title']} ({h['year']})" for h in history]
 
     # short DB connections only: never hold one open during the long Claude call (Neon compute)
     facets = get_facets(films, n)
-    answer = ask(facets, films, exclude, canon_names, rng)
+    answer = ask(facets, films, exclude, rng)
     lens_of = {f["name"]: f.get("lens", "") for f in facets}
     picks, logrows = [], []
 
@@ -145,8 +138,6 @@ def choose(films, history):
         k2 = mp.fkey(cand.get("original_title", ""), cand.get("year"))
         if k1 in watched_keys or k2 in watched_keys:
             return None, "seen"
-        if k1 in canon_keys or k2 in canon_keys:
-            return None, "canon-list"
         try:
             m = mp.lookup_title(cand["title"], cand.get("year")) or (
                 cand.get("original_title") and mp.lookup_title(cand["original_title"], cand.get("year")))
