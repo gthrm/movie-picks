@@ -18,8 +18,6 @@ DEEP_VOTES = 50_000
 MAX_CANON = 2
 MIN_DEEP = 3
 
-CANON_EXTRA = mp.CFG.get("CANON_EXTRA", "")  # "Title (Year); Title (Year); ..." in .env
-
 LENSES = [
     "outside Europe and the US", "made before 1980", "made in 2015 or later", "Asian cinema",
     "a genre film (thriller/horror/sci-fi/comedy)", "Latin American or African cinema",
@@ -42,12 +40,16 @@ def ensure_tables(c):
     c.execute("""create table if not exists candidates (
         id bigserial primary key, batch date not null, facet text, lens text, title text, year int,
         tmdb int, votes int, probability real, picked boolean default false, reason text)""")
+    c.execute("""create table if not exists canon (
+        title text not null, year int not null, primary key (title, year))""")
 
 
 def canon_set():
-    """IMDb Top 250 (via Radarr's public metadata server) + a hand-written canon list."""
-    titles = {mp.fkey(t.split(" (")[0], int(t.rsplit("(", 1)[1].rstrip(");"))) for t in
-              [x.strip() for x in CANON_EXTRA.replace("\n", " ").split(";") if x.strip()]}
+    """IMDb Top 250 (via Radarr's public metadata server) + the hand-picked `canon` table."""
+    with mp.db() as c:
+        ensure_tables(c)
+        rows = c.execute("select title, year from canon order by title").fetchall()
+    titles = {mp.fkey(t, y) for t, y in rows}
     tmdb = set()
     try:
         req = urllib.request.Request("https://api.radarr.video/v1/list/imdb/top250",
@@ -56,7 +58,7 @@ def canon_set():
             tmdb.add(m["TmdbId"])
     except Exception as e:  # noqa: BLE001
         mp.log("top250 fetch failed:", e)
-    names = [x.strip() for x in CANON_EXTRA.replace("\n", " ").split(";") if x.strip()]
+    names = [f"{t} ({y})" for t, y in rows]
     return titles, tmdb, names
 
 
