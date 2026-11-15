@@ -77,10 +77,17 @@ create index if not exists events_tmdb on events(tmdb);
 FILM_COLS = ["name", "year", "imdb", "tmdb", "liked", "rating", "original", "director", "slug", "source"]
 
 
+_schema_done = False
+
+
 def db():
+    """Short-lived connection. Never keep one open across slow work (Neon bills compute while connected)."""
+    global _schema_done
     import psycopg
-    conn = psycopg.connect(CFG["DATABASE_URL"], autocommit=True)
-    conn.execute(SCHEMA)
+    conn = psycopg.connect(CFG["DATABASE_URL"], autocommit=True, connect_timeout=20)
+    if not _schema_done:
+        conn.execute(SCHEMA)
+        _schema_done = True
     return conn
 
 
@@ -246,8 +253,9 @@ def load_films():
     with db() as c:
         films = {r[0]: {k: v for k, v in zip(FILM_COLS, r[1:]) if v is not None}
                  for r in c.execute("select key, " + ", ".join(FILM_COLS) + " from films")}
-        read_export(films)
-        scrape_letterboxd(films, CFG["LETTERBOXD_USER"])
+    read_export(films)
+    scrape_letterboxd(films, CFG["LETTERBOXD_USER"])
+    with db() as c:
         cols = ", ".join(FILM_COLS)
         upd = ", ".join(f"{k}=coalesce(excluded.{k}, films.{k})" for k in FILM_COLS) + ", updated_at=now()"
         with c.cursor() as cur:
@@ -285,116 +293,6 @@ def run_claude(prompt, system=None):
 
 class ClaudeLimit(RuntimeError):
     """Subscription usage limit hit; worth retrying later."""
-
-
-def ask_claude(films, exclude, n):
-    """Split the user's list into n maximally different taste facets and propose
-    3 ranked candidates per facet. Returns [{facet, anchors, picks:[...]}]."""
-    fmt = lambda f: (f"{f['name']} ({f.get('year') or '?'})" + (f" ★{f['rating']}" if f.get("rating") else "")
-                     + (" [CHOSE TO WATCH - strongest signal]" if f.get("source") == "download" else ""))
-    seen = [fmt(f) for f in films.values()]
-    prompt = f"""You are a film curator with very broad taste. One person's film list (saved/watched; no ratings):
-{chr(10).join(seen)}
-
-Never recommend (already seen or already suggested):
-{chr(10).join(exclude) or '(none)'}
-
-Step 1. Split their list into exactly {n} taste facets that are as DIFFERENT from each other as possible
-(genre, era, region, tone, energy).
-Each facet must be anchored by at least 2 films from the list. At most 2 facets may be about pre-1980 cinema.
-
-Step 2. For each facet propose 3 ranked unseen feature films that a fan of that facet's anchors would enjoy.
-- Prefer non-obvious picks: skip the famous "greatest films" canon; at least one candidate per facet should be
-  little-known (well under 50k IMDb votes).
-- Across the FIRST candidates of all facets: at least 4 films from 2010 or later, at most 3 before 1980,
-  at least 5 different countries, no director twice, no two films with the same premise/tone.
-- Only released films that exist. Use exact titles and years.
-
-Respond with ONLY a JSON array, no prose:
-[{{"facet": "short facet name, 2-4 words", "anchors": ["Film A", "Film B"],
-   "picks": [{{"title": "English title", "original_title": "original-language title", "year": 1999,
-              "director": "Name", "country": "Country", "why": "..."}}, ...3 items]}}, ...{n} facets]
-
-Rules for "why" (max 30 words, plain English, no hype):
-- One concrete sentence about what the film actually is (premise, style, tone).
-- Optionally: "Close to <anchor>" naming ONE anchor film of that facet and the concrete shared quality.
-- Never claim what they felt ("you loved", "you'll adore"). No marketing adjectives.
-- Only state facts you are certain about (adaptations, remakes, influences); if unsure, leave it out."""
-    return run_claude(prompt)
-
-
-def choose(films, history):
-    n = int(CFG["PICKS_PER_DAY"])
-    watched_keys = set(films) | {fkey(f["original"], f.get("year")) for f in films.values() if f.get("original")}
-    watched_imdb = {f.get("imdb") for f in films.values() if f.get("imdb")}
-    watched_tmdb = {f.get("tmdb") for f in films.values() if f.get("tmdb")}
-    sent_tmdb = {h["tmdb"] for h in history}
-    in_radarr = {m["tmdbId"] for m in radarr("GET", "/movie")}
-    picks = []
-    max_per_decade = max(2, -(-n * 3 // 10))   # 3 for 10 picks
-    max_per_genre = max(2, -(-n * 3 // 10))
-
-    def resolve(c):
-        if fkey(c["title"], c.get("year")) in watched_keys or fkey(c.get("original_title", ""), c.get("year")) in watched_keys:
-            return None
-        try:
-            m = lookup_title(c["title"], c.get("year")) or (
-                c.get("original_title") and lookup_title(c["original_title"], c.get("year")))
-        except Exception as e:  # noqa: BLE001
-            log("lookup failed", c["title"], e)
-            return None
-        if not m:
-            log("not found in metadata:", c["title"], c.get("year"))
-            return None
-        t = m["tmdbId"]
-        if (m.get("imdbId") in watched_imdb or t in watched_tmdb or t in sent_tmdb or t in in_radarr
-                or any(p["tmdb"] == t for p in picks)
-                or fkey(m["title"], m["year"]) in watched_keys
-                or fkey(m.get("originalTitle", ""), m["year"]) in watched_keys):
-            return None
-        return m
-
-    def fits(m, c):
-        dec = (m.get("year") or 0) // 10
-        g = (m.get("genres") or ["?"])[0]
-        d = norm(c.get("director", ""))
-        return (sum(1 for p in picks if p["year"] // 10 == dec) < max_per_decade
-                and sum(1 for p in picks if (p["genres"] or ["?"])[0] == g) < max_per_genre
-                and not (d and any(norm(p["director"]) == d for p in picks)))
-
-    def add(m, c, facet):
-        picks.append({"tmdb": m["tmdbId"], "title": m["title"], "year": m["year"], "facet": facet,
-                      "original_title": m.get("originalTitle") or c.get("original_title") or m["title"],
-                      "director": c.get("director", ""), "why": c.get("why", ""),
-                      "overview": m.get("overview", ""), "runtime": m.get("runtime") or 0,
-                      "genres": m.get("genres", [])[:3], "poster": poster_url(m),
-                      "imdb": m.get("imdbId") or "", "trailer": m.get("youTubeTrailerId") or "",
-                      "imdb_rating": ((m.get("ratings") or {}).get("imdb") or {}).get("value"),
-                      "language": (m.get("originalLanguage") or {}).get("name", "")})
-
-    exclude = [f"{h['title']} ({h['year']})" for h in history]
-    for attempt in range(2):
-        need = n - len(picks)
-        if need <= 0:
-            break
-        facets = ask_claude(films, exclude + [f"{p['title']} ({p['year']})" for p in picks], need if attempt else n)
-        for f in facets:
-            if len(picks) >= n:
-                break
-            fallback = None
-            for c in f.get("picks", []):
-                m = resolve(c)
-                if not m:
-                    continue
-                if fits(m, c):
-                    add(m, c, f.get("facet", ""))
-                    fallback = None
-                    break
-                fallback = fallback or (m, c)
-            else:
-                if fallback and len(picks) < n:
-                    add(*fallback, f.get("facet", ""))
-    return picks
 
 
 # ---------------------------------------------------------------- links
@@ -525,7 +423,9 @@ def cmd_pick(dry_run=False):
         raise SystemExit("no picks produced")
     today = dt.date.today()
     body = render_email(picks, today)
-    (STATE / "last_email.html").write_text(body)
+    out = STATE / "last_email.html"
+    out.write_text(body)
+    out.chmod(0o600)
     subject = f"{len(picks)} films tonight: " + " · ".join(p["title"] for p in picks[:3]) + (" …" if len(picks) > 3 else "")
     log(subject)
     if dry_run or not CFG.get("SMTP_PASSWORD"):
@@ -566,10 +466,10 @@ def movie_status(m):
     if q:
         r = q[0]
         pct = 100 * (1 - (r.get("sizeleft") or 0) / r["size"]) if r.get("size") else 0
-        left = f" · {r['timeleft']} left" if r.get("timeleft") else ""
+        left = f" · {E(str(r['timeleft']))} left" if r.get("timeleft") else ""
         return (f'<div class="s">Downloading: {pct:.0f}%{left}</div><div class="m">{E(r.get("title", ""))}</div>'
                 f'<div class="bar"><i style="width:{pct:.0f}%"></i></div>'), True
-    if recent_stall(m["tmdbId"]):
+    if recent_stall(m["id"]):
         return ('<div class="s">The previous torrent stalled (no seeders).</div>'
                 '<div class="m">Looking for another release — this page refreshes by itself.</div>'), True
     added = dt.datetime.fromisoformat(m["added"].replace("Z", "+00:00"))
@@ -627,7 +527,6 @@ class Handler(BaseHTTPRequestHandler):
                 body, refresh = movie_status(existing[0])
                 return self.page(existing[0], body, refresh)
             m = lookup_tmdb(tmdb)
-            event(tmdb, "open", ua=self.headers.get("User-Agent", "")[:200])
             self.page(m, '<form method="post"><button type="submit">⬇ Download</button></form>'
                          '<div class="m" style="margin-top:8px">1080p, up to 5 GB, saved to the SSD.</div>')
         except Exception as e:  # noqa: BLE001
@@ -690,11 +589,12 @@ def cmd_watch():
             c.execute("delete from dl_progress where download_id=%s", (did,))
 
 
-def recent_stall(tmdb):
+def recent_stall(movie_id):
+    """Did the watcher blocklist a stalled release for this movie in the last day? (Radarr only, no DB.)"""
     try:
-        with db() as c:
-            return c.execute("select 1 from events where tmdb=%s and kind='stalled' and at > now() - interval '1 day'",
-                             (tmdb,)).fetchone() is not None
+        since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        recs = radarr("GET", f"/blocklist/movie?movieId={int(movie_id)}") or []
+        return any(dt.datetime.fromisoformat(r["date"].replace("Z", "+00:00")) > since for r in recs)
     except Exception:  # noqa: BLE001
         return False
 
