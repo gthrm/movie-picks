@@ -262,8 +262,8 @@ def load_films():
             cur.executemany(
                 f"insert into films(key, {cols}) values (%s, {', '.join(['%s'] * len(FILM_COLS))}) "
                 f"on conflict (key) do update set {upd}",
-                [(k, *[f.get(col) for col in FILM_COLS]) for k, f in films.items()])
-    return films
+                [(k, *[f.get(col) for col in FILM_COLS]) for k, f in films.items() if f.get("liked")])
+    return films   # unliked films stay in memory only: still never recommended this run
 
 
 def load_history():
