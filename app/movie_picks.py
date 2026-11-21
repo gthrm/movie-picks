@@ -284,7 +284,10 @@ def run_claude(prompt, system=None):
         meta = json.loads(out.stdout)
     except ValueError:
         meta = {}
-    if meta.get("api_error_status") == 429 or (meta.get("is_error") and "limit" in str(meta.get("result", "")).lower()):
+    err = str(meta.get("result", "")).lower() if meta.get("is_error") else ""
+    if "authenticat" in err or "login" in err or meta.get("api_error_status") in (401, 403):
+        raise RuntimeError(f"claude auth failed (run `claude auth login`): {meta.get('result')}")
+    if meta.get("api_error_status") == 429 or "usage limit" in err or "rate limit" in err:
         raise ClaudeLimit(meta.get("result", "usage limit"))
     if out.returncode != 0 or meta.get("is_error") or "result" not in meta:
         raise RuntimeError(f"claude failed: {out.stderr[-2000:]} {out.stdout[-2000:]}")
@@ -399,6 +402,33 @@ def send_email(subject, html_body, text_body):
         s.login(CFG["SMTP_USER"], CFG["SMTP_PASSWORD"].replace(" ", ""))
         s.send_message(msg)
     log("email sent to", rcpts)
+
+
+def write_metrics(ok):
+    """node_exporter textfile metrics for Grafana alerts (METRICS_FILE; unset = off)."""
+    path = os.environ.get("METRICS_FILE") or CFG.get("METRICS_FILE")
+    if not path:
+        return
+    path = pathlib.Path(path)
+    last = 0
+    try:
+        m = re.search(r"^movie_picks_last_success_timestamp_seconds (\S+)$", path.read_text(), re.M)
+        last = float(m.group(1)) if m else 0
+    except OSError:
+        pass
+    now = time.time()
+    if ok:
+        last = now
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("# HELP movie_picks_last_success_timestamp_seconds Last successful daily email.\n"
+                   "# TYPE movie_picks_last_success_timestamp_seconds gauge\n"
+                   f"movie_picks_last_success_timestamp_seconds {last:.0f}\n"
+                   "# HELP movie_picks_last_run_ok 1 if the last daily run sent the email, else 0.\n"
+                   "# TYPE movie_picks_last_run_ok gauge\n"
+                   f"movie_picks_last_run_ok {1 if ok else 0}\n"
+                   f"movie_picks_last_run_timestamp_seconds {now:.0f}\n")
+    tmp.chmod(0o644)
+    tmp.replace(path)
 
 
 def cmd_pick_with_retry(dry_run=False, tries=17, wait_min=30):
@@ -614,6 +644,14 @@ if __name__ == "__main__":
         f = load_films()
         log(f"letterboxd sync: {len(f)} films, liked {sum(1 for x in f.values() if x.get('liked'))}")
     elif len(sys.argv) > 1 and sys.argv[1] == "pick":
-        cmd_pick_with_retry(dry_run="--dry-run" in sys.argv)
+        dry = "--dry-run" in sys.argv
+        try:
+            cmd_pick_with_retry(dry_run=dry)
+        except BaseException:
+            if not dry:
+                write_metrics(ok=False)
+            raise
+        if not dry:
+            write_metrics(ok=True)
     else:
         print(__doc__)

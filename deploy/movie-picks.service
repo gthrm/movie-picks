@@ -7,5 +7,6 @@ Wants=network-online.target
 Type=oneshot
 User=user
 WorkingDirectory=/home/user/movie-picks
+Environment=METRICS_FILE=/home/user/monitoring/textfile/movie_picks.prom
 ExecStart=/usr/bin/python3 -I /home/user/movie-picks/app/movie_picks.py pick
-TimeoutStartSec=3600
+TimeoutStartSec=9h
